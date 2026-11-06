@@ -52,6 +52,7 @@ class TraceState:
     last_updated_at: float = field(default_factory=time.time)
     # propagate_attributes() kwargs the root was opened with, re-applied to every child.
     propagated: dict[str, Any] = field(default_factory=dict)
+    receipt: Any = None
 
 
 _STATE_LOCK = threading.Lock()
@@ -77,6 +78,7 @@ _LANGFUSE_CLIENT_BY_HOME: dict[str, Any] = {}
 _LANGFUSE_CLIENT_LOCK = threading.Lock()
 # The registering PluginContext: the public seam for the served profile and the running cron job.
 _PLUGIN_CTX: Any = None
+_RECEIPT_RUNTIME: Any = None
 _READ_FILE_LINE_RE = re.compile(r"^\s*(\d+)\|(.*)$")
 _READ_FILE_HEAD_LINES = 25
 _READ_FILE_TAIL_LINES = 15
@@ -759,7 +761,42 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         root_span.set_trace_io(input=trace_input)
 
     _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated)
+    state = TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated)
+    # The runtime keeps the original Receipt after trace teardown. YAML opt-in
+    # is served-profile scoped; no worker, transport or backend acceptance implied.
+    try:
+        if _RECEIPT_RUNTIME is not None:
+            state.receipt = _RECEIPT_RUNTIME.open_trace(trace_id, root_span.id, turn_id)
+            if state.receipt is not None:
+                state.root_span = _ReceiptObservation(root_span, state.receipt, root=True)
+    except Exception:
+        logger.debug("langfuse receipt runtime unavailable")
+    return state
+
+
+class _ReceiptObservation:
+    """Transparent local handle adapter. Only successful SDK end() records local completion."""
+    def __init__(self, inner, receipt, *, root=False):
+        self._inner, self._receipt, self._root = inner, receipt, root
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def start_observation(self, **kwargs):
+        child = self._inner.start_observation(**kwargs)
+        try:
+            self._receipt.started(child.id)
+        except Exception:
+            self._receipt.invalidate()
+        return _ReceiptObservation(child, self._receipt)
+
+    def end(self, *args, **kwargs):
+        result = self._inner.end(*args, **kwargs)
+        try:
+            self._receipt.ended(self._inner.id)
+        except Exception:
+            self._receipt.invalidate()
+        return result
 
 
 def _start_child_observation(state: TraceState, *, name: str, as_type: str, input_value: Any,
@@ -804,10 +841,12 @@ def _end_children(state: TraceState, *, include_subagents: bool = False) -> None
         _end_observation(observation)
 
 
-def _end_root(state: TraceState, label: str) -> None:
+def _end_root(state: TraceState, label: str, *, receipt_reason: str = "normal") -> None:
     """End the root span; never raises."""
     with _failsafe(label):
         state.root_span.end()
+    if state.receipt is not None:
+        state.receipt.finish(receipt_reason)
 
 
 def _finalize_all_traces() -> None:
@@ -821,7 +860,7 @@ def _finalize_all_traces() -> None:
     for key, state in states:
         with _failsafe(f"atexit finalize for {key}"):  # _end_root never raises
             _end_children(state, include_subagents=True)
-            _end_root(state, f"atexit finalize for {key}")
+            _end_root(state, f"atexit finalize for {key}", receipt_reason="shutdown")
     if states:
         # atexit runs with NO profile scope, so it must never build a client (a credential read
         # here raises UnscopedSecretError under multiplex and would skip every flush). Flush only
@@ -837,7 +876,7 @@ def _flush(client: Any) -> None:
             client.flush()
 
 
-def _finish_trace(task_key: str, *, output: Any = None) -> None:
+def _finish_trace(task_key: str, *, output: Any = None, receipt_reason: str = "normal") -> None:
     """End spans locally; the SDK's background exporter owns delivery.
 
     A synchronous flush here waits for network I/O, so an unavailable
@@ -864,11 +903,13 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
             for method, label in (("set_trace_io", "set_trace_io(output)"), ("update", "root update(output)")):
                 with _failsafe(label):
                     getattr(state.root_span, method)(output=final_output)
-        _end_root(state, "root end()")
+        _end_root(state, "root end()", receipt_reason=receipt_reason)
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
         with contextlib.suppress(Exception):  # last-chance end so the root still exports
             state.root_span.end()
+        if state.receipt is not None:
+            state.receipt.finish("error")
 
 
 def _request_key(api_call_count: Any) -> str:
@@ -911,7 +952,7 @@ def _get_or_start_state_locked(task_key: str, **root_kwargs: Any) -> TraceState:
         over = len(_TRACE_STATE) - (_MAX_TRACE_STATE - 1)
         for key, stale in sorted(_TRACE_STATE.items(), key=lambda kv: kv[1].last_updated_at)[:max(over, 0)]:
             _TRACE_STATE.pop(key, None)
-            _end_root(stale, "evict stale trace")
+            _end_root(stale, "evict stale trace", receipt_reason="eviction")
         _TRACE_STATE[task_key] = state
     state.last_updated_at = time.time()
     return state
@@ -1175,7 +1216,7 @@ def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_co
     # A retryable failure is followed by another pre_api_request on the same
     # trace; keep the turn open. A terminal failure ends the turn.
     if retryable is False:
-        _finish_trace(task_key, output={"error": error_metadata})
+        _finish_trace(task_key, output={"error": error_metadata}, receipt_reason="error")
     else:
         state.last_updated_at = time.time()
 
@@ -1195,7 +1236,7 @@ def on_session_finalize(*, session_id: str = "", reason: str = "", **_: Any) -> 
     with _STATE_LOCK:
         keys = [k for k in _TRACE_STATE if not session_id or k == session_id or any(f in k for f in fragments)]
     for key in keys:
-        _finish_trace(key)
+        _finish_trace(key, receipt_reason="shutdown" if reason == "shutdown" else "error")
 
     # /new, expiry and other session boundaries must not wait for the backend.
     # The SDK keeps exporting ended spans in its bounded background queue.
@@ -1272,8 +1313,10 @@ def register(ctx) -> None:
         logger.info("langfuse: this Hermes core still ships Langfuse built in; "
                     "the plugin stays inactive until core drops it")
         return
-    global _PLUGIN_CTX
+    global _PLUGIN_CTX, _RECEIPT_RUNTIME
     _PLUGIN_CTX = ctx
+    from .receipt_runtime import ReceiptRuntime
+    _RECEIPT_RUNTIME = ReceiptRuntime(ctx)
     # Both hook-name variants so the plugin works across Hermes versions:
     # *_api_request fire per API call (preferred); *_llm_call once per turn.
     hooks = (
