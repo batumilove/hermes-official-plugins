@@ -1,14 +1,24 @@
 """Offline plugin root-to-host-boundary integration; SDK is a local recording double."""
 from contextlib import nullcontext
+import importlib.util
+import sys
 from types import SimpleNamespace
 
 import pytest
+
+if importlib.util.find_spec("hermes_cli.plugins_turn_boundary") is None:
+    pytest.skip("Host lacks the optional turn-evidence API; pinned-core CI exercises it",
+                allow_module_level=True)
+
 import langfuse_plugin as plugin
 from langfuse_plugin.receipt_runtime import ReceiptRuntime
 from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
 from hermes_cli.plugins_turn_boundary import turn_boundary
 from hermes_cli.plugins_turn_evidence_collector import TurnEvidenceCollector
 from langfuse_plugin import delivery_receipts
+
+pytestmark = pytest.mark.skipif(sys.platform != "linux",
+                                 reason="Receipt producer identity requires Linux /proc")
 
 
 @pytest.fixture

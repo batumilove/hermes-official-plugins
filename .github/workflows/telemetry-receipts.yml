@@ -63,6 +63,9 @@ jobs:
           from hermes_cli.version_provenance import IMPORTED_RELEASE
           from hermes_cli.version_info import get_version_info
           from scripts.check_fork_delta import DEFAULT_MANIFEST, fetch_provenance_source
+          from hermes_cli.plugins_turn_boundary import turn_boundary
+          from hermes_cli.plugins_turn_evidence_collector import TurnEvidenceCollector, TransferVerifier
+          assert callable(turn_boundary) and callable(TurnEvidenceCollector) and callable(TransferVerifier)
           version, tag_object, release_commit = IMPORTED_RELEASE
           ref = "refs/tags/v" + version
           subprocess.run(["git", "fetch", "--no-tags",

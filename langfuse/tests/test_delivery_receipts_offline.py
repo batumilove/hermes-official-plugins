@@ -20,6 +20,7 @@ from receipt_test_plugin import delivery_receipts as dr
 TID, RID, CID = "1" * 32, "2" * 16, "3" * 16
 
 
+@unittest.skipUnless(sys.platform == "linux", "Receipt producer identity requires Linux /proc")
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

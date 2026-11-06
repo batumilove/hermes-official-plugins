@@ -1,11 +1,16 @@
 """Synthetic whole-path proof authentication and independent backend reconciliation."""
 import hashlib
 import hmac
+import importlib.util
 import json
 from datetime import datetime, timezone
 from email.message import Message
 
 import pytest
+
+if importlib.util.find_spec("hermes_cli.plugins_turn_evidence_collector") is None:
+    pytest.skip("Host lacks the optional transfer verifier; pinned-core CI exercises it",
+                allow_module_level=True)
 
 from langfuse_plugin.backend_readback import ObservationReader
 from langfuse_plugin.delivery_verification import DeliveryVerifier

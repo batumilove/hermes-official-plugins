@@ -7,6 +7,14 @@ that independent readback. These are operator/controller APIs, with no automatic
 requests, configuration changes, background polling, directory creation or cleanup.
 The existing receipt feature remains disabled by default.
 
+The signed-transfer consumer requires the optional host turn-evidence API. The
+receipt interoperability workflow pins merged Hermes core
+`d5212091d0f698d90c1eb96e96faa7bc049876c0` and requires those imports before
+running every receipt contract on Linux. The general upstream-host matrix still
+tests the ordinary SDK plugin and portable backend reader; it skips optional
+API tests only when those host modules are absent. Producer Receipt tests run
+on Linux because their identity is the real `/proc` PID/start/boot tuple.
+
 The operator must provide the exact HTTPS base URL, read credentials and expected
 project ID, and independently pin the profile, producer PID/start/boot tuple,
 turn digest, trace ID, receipt digest and registration digest. Never derive the
