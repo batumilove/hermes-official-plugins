@@ -1,4 +1,5 @@
 """Portable adapter scheduling tests; storage stalls are controlled by events."""
+import importlib.util
 import threading
 from types import SimpleNamespace
 
@@ -79,6 +80,9 @@ def test_stalled_transfer_does_not_hold_runtime_mutex_and_revalidates(tmp_path, 
 
 @pytest.mark.parametrize('change', ['none', 'expiry', 'replacement', 'closed'])
 def test_same_collector_admission_cannot_restore_global_convoy(tmp_path, monkeypatch, change):
+    if (importlib.util.find_spec('hermes_cli.plugins_turn_boundary') is None
+            or importlib.util.find_spec('hermes_cli.plugins_turn_evidence_collector') is None):
+        pytest.skip('Host lacks optional turn evidence APIs; pinned-core CI requires them')
     from hermes_cli import plugins_turn_boundary as boundary
     now = [0.0]
     directory = str(tmp_path)
@@ -144,3 +148,27 @@ def test_same_collector_admission_cannot_restore_global_convoy(tmp_path, monkeyp
     assert progressed and not first.is_alive() and not second.is_alive() and not errors
     assert admitted == ([receipt] if change == 'none' else [None])
     assert invalidated == ([] if change == 'none' else [True])
+
+
+def test_same_collector_case_skips_only_when_optional_API_is_absent(tmp_path, monkeypatch):
+    original = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, 'find_spec', lambda name, *a, **kw:
+        None if name.startswith('hermes_cli.plugins_turn_') else original(name, *a, **kw))
+    with pytest.raises(pytest.skip.Exception):
+        test_same_collector_admission_cannot_restore_global_convoy(tmp_path, monkeypatch, 'none')
+
+
+def test_present_but_broken_boundary_import_is_not_silently_skipped(tmp_path, monkeypatch):
+    import builtins
+    original_find, original_import = importlib.util.find_spec, builtins.__import__
+    monkeypatch.setattr(importlib.util, 'find_spec', lambda name, *a, **kw:
+        object() if name.startswith('hermes_cli.plugins_turn_') else original_find(name, *a, **kw))
+
+    def broken(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == 'hermes_cli' and 'plugins_turn_boundary' in fromlist:
+            raise ImportError('present boundary is broken')
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, '__import__', broken)
+    with pytest.raises(ImportError, match='present boundary is broken'):
+        test_same_collector_admission_cannot_restore_global_convoy(tmp_path, monkeypatch, 'none')
