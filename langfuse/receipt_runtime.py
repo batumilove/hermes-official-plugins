@@ -73,13 +73,20 @@ class ReceiptRuntime:
                 item = (self.clock(), collector)
                 self.turns[key] = item
             collector = item[1]
-            receipt = collector.open_trace(trace_id, root_id)
-            if receipt is None:
-                return None
-            if collector.retain(trace_id) is None:
-                receipt.invalidate()
-                return None
-            return receipt
+        # A copied boundary can revisit a collector whose storage lock is busy.
+        # Never let that wait restore a convoy behind the global runtime lock.
+        receipt = collector.open_trace(trace_id, root_id)
+        if receipt is None:
+            return None
+        retained = collector.retain(trace_id) is not None
+        with self.lock:
+            _retired.extend(self._expire())
+            admitted = (retained and not self.closed and self.turns.get(key) is item
+                        and self._settings() == directory)
+        if not admitted:
+            receipt.invalidate()
+            return None
+        return receipt
 
     def collect(self, turn_id, *, deadline_seconds=1.0):
         """Local status/proof report only; never claims backend delivery or sends data."""
@@ -174,9 +181,15 @@ class ReceiptRuntime:
             _retired.extend(self._expire())
             if not self._owns_proof_collector(key, item, binding) or not self._channel_enabled():
                 return None
-            # Expiry and adapter admission use this same lock. A physical local
-            # reference alone is not retained ownership or permission to sign.
-            envelope = collector.issue_transfer(trace) if operation == "transfer" else None
+        finally:
+            self.lock.release()
+        # Collector storage and locking may stall. Never carry that latency into
+        # admission of unrelated turns or runtime shutdown. The result has no
+        # authority to leave this handler until ownership is revalidated below.
+        envelope = collector.issue_transfer(trace) if operation == "transfer" else None
+        if not self.lock.acquire(timeout=0.1):
+            return None
+        try:
             _retired.extend(self._expire())
             if not self._owns_proof_collector(key, item, binding) or not self._channel_enabled():
                 return None
