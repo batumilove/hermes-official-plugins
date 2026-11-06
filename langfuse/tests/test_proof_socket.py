@@ -1,4 +1,5 @@
 """Native Linux local transport, private lifecycle and profile context contracts."""
+import importlib.util
 import os
 import select
 import signal
@@ -63,25 +64,46 @@ def test_real_socket_describe_transfer_and_owned_handle_release(paths):
         exchange(str(path), client.begin("describe", BASE))
 
 
-def test_worker_has_own_profile_no_launch_secrets_or_turn(paths):
+def test_worker_has_own_profile_no_launch_secrets(paths):
     from agent.secret_scope import current_secret_scope, set_secret_scope
     from hermes_constants import get_hermes_home
-    from hermes_cli.plugins_turn_boundary import _CURRENT
 
     observed = []
     def inspect(operation, binding):
-        observed.append((str(get_hermes_home()), current_secret_scope(), _CURRENT.get()))
+        observed.append((str(get_hermes_home()), current_secret_scope()))
         return handler(operation, binding)
     token = set_secret_scope({"SYNTHETIC_PRIVATE_SENTINEL": "never inherit"}, profile_home="/other")
     server = serve(paths, inspect)
     try:
         client = ProofClient(KEY)
         assert client.accept(exchange(str(paths[1]), client.begin("describe", BASE)))
-        assert observed == [(BASE["profile"], {}, None)]
+        assert observed == [(BASE["profile"], {})]
     finally:
         server.close()
         from agent.secret_scope import reset_secret_scope
         reset_secret_scope(token)
+
+
+def test_worker_does_not_inherit_the_first_turn_context(paths):
+    if importlib.util.find_spec("hermes_cli.plugins_turn_boundary") is None:
+        pytest.skip("optional host turn-boundary API absent; required by pinned-core CI")
+    from hermes_cli.plugins import PluginManager
+    from hermes_cli.plugins_turn_boundary import _CURRENT, turn_boundary
+
+    observed = []
+    def inspect(operation, binding):
+        observed.append(_CURRENT.get())
+        return handler(operation, binding)
+    manager = PluginManager(scope_key=BASE["profile"])
+    with turn_boundary(manager, "first-turn"):
+        assert _CURRENT.get() is not None
+        server = serve(paths, inspect)
+        try:
+            client = ProofClient(KEY)
+            assert client.accept(exchange(str(paths[1]), client.begin("describe", BASE)))
+            assert observed == [None]
+        finally:
+            server.close()
 
 
 def test_existing_socket_is_preserved(paths):
