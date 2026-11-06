@@ -1,0 +1,95 @@
+name: Telemetry receipt interoperability
+
+on:
+  pull_request:
+    paths:
+      - langfuse/**
+      - .github/workflows/telemetry-receipts.yml
+  push:
+    branches: [main]
+    paths:
+      - langfuse/**
+      - .github/workflows/telemetry-receipts.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-receipts:
+    name: Exact core and plugin receipt contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CORE_SHA: d5212091d0f698d90c1eb96e96faa7bc049876c0
+      PLUGIN_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out the pinned merged core
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: batumilove/hermes-agent
+          ref: ${{ env.CORE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the exact plugin head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.PLUGIN_SHA }}
+          path: paired-plugin
+          persist-credentials: false
+      - name: Verify both source identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CORE_SHA"
+          test "$(git -C paired-plugin rev-parse HEAD)" = "$PLUGIN_SHA"
+          printf 'Core: `%s`\nPlugin: `%s`\nOffline Linux contracts, not live delivery acceptance.\n' "$CORE_SHA" "$PLUGIN_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the locked core test environment
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: python
+          test-environment: 'true'
+          cache: 'false'
+          cache-python: 'false'
+          save-tools-cache: 'false'
+          save-python-cache: 'false'
+      - name: Verify the core's pinned imported release
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$HERMES_PYTHON" - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          from hermes_cli.version_provenance import IMPORTED_RELEASE
+          from hermes_cli.version_info import get_version_info
+          from scripts.check_fork_delta import DEFAULT_MANIFEST, fetch_provenance_source
+          from hermes_cli.plugins_turn_boundary import turn_boundary
+          from hermes_cli.plugins_turn_evidence_collector import TurnEvidenceCollector, TransferVerifier
+          assert callable(turn_boundary) and callable(TurnEvidenceCollector) and callable(TransferVerifier)
+          version, tag_object, release_commit = IMPORTED_RELEASE
+          ref = "refs/tags/v" + version
+          subprocess.run(["git", "fetch", "--no-tags",
+                          "https://github.com/NousResearch/hermes-agent.git", ref + ":" + ref], check=True)
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+          assert git("rev-parse", ref) == tag_object
+          assert git("rev-parse", ref + "^{commit}") == release_commit
+          fetch_provenance_source(DEFAULT_MANIFEST, cwd=Path.cwd())
+          info = get_version_info()
+          assert info.commit == os.environ["CORE_SHA"] and info.base_version == version
+          PY
+      - name: Run all Langfuse and core custody contracts without credentials
+        shell: bash
+        env:
+          HERMES_TEST_WORKERS: '2'
+          HERMES_TEST_FILE_RETRIES: '0'
+        run: |
+          set -euo pipefail
+          scripts/run_tests.sh \
+            "$GITHUB_WORKSPACE/paired-plugin/langfuse/tests" \
+            tests/hermes_cli/test_turn_evidence_collector.py \
+            tests/hermes_cli/test_plugin_turn_boundary.py \
+            tests/hermes_cli/test_plugin_turn_boundary_async.py \
+            tests/agent/test_plugin_stream_evidence.py \
+            tests/agent/test_turn_evidence_boundary.py \
+            --file-timeout 120
