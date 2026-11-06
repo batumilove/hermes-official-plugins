@@ -81,7 +81,8 @@ def seal(world, *, reason="normal", queued=False, fail=False):
         if fail:
             scope.fail()
     end = time.time()
-    stamp = lambda value: datetime.fromtimestamp(value, UTC).isoformat()
+    def stamp(value):
+        return datetime.fromtimestamp(value, UTC).isoformat()
     backend.rows = [{"id": ROOT, "traceId": TRACE, "projectId": "synthetic-project",
                      "parentObservationId": None, "startTime": stamp(start), "endTime": stamp(end)}]
     snapshot = read_receipt(settings["directory"], TRACE)
@@ -236,3 +237,49 @@ def test_attempt_key_change_before_request_never_queries_backend(world):
         (world[3].parent / "key").write_bytes(b"changed".ljust(32, b"!"))
         assert consumer.verify(expected_binding=base).verdict == "unverified"
         assert world[4].calls == 0
+
+
+@pytest.mark.parametrize("phase", ["collection", "transfer"])
+def test_runtime_expiry_during_request_cannot_release_proof(world, monkeypatch, phase):
+    _, base, _ = seal(world)
+    runtime = world[0]
+    collector = next(iter(runtime.turns.values()))[1]
+    now = [runtime.clock()]
+    monkeypatch.setattr(runtime, "clock", lambda: now[0])
+    client = ProofClient(KEY)
+    if phase == "collection":
+        original = collector.collect
+        def expire_after_collect(**kwargs):
+            result = original(**kwargs)
+            now[0] += 301
+            # Another adapter operation expires ownership while the wire worker
+            # still physically holds this collector and its valid core proof.
+            assert runtime.collect("another-turn") == {"status": "unverified"}
+            return result
+        monkeypatch.setattr(collector, "collect", expire_after_collect)
+        assert describe(world, base, client) is None
+    else:
+        ready = describe(world, base, client)
+        assert ready is not None
+        original = collector.issue_transfer
+        def expire_during_transfer(*args, **kwargs):
+            result = original(*args, **kwargs)
+            now[0] += 301
+            return result
+        monkeypatch.setattr(collector, "issue_transfer", expire_during_transfer)
+        assert transfer(world, ready.binding, client) is None
+    assert not runtime.turns and world[4].calls == 0
+
+
+def test_expired_collector_finalization_does_not_hold_runtime_lock(world):
+    runtime, _, settings, _, _, _ = world
+    observed = []
+    class Finalizer:
+        def __del__(self):
+            acquired = runtime.lock.acquire(blocking=False)
+            observed.append(acquired)
+            if acquired:
+                runtime.lock.release()
+    runtime.turns[(settings["directory"], object())] = (runtime.clock() - 301, Finalizer())
+    assert runtime.collect("missing") == {"status": "unverified"}
+    assert observed == [True]

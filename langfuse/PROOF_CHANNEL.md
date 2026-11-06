@@ -58,6 +58,9 @@ binding and freshly re-reads the original Receipt through the core collector's
 single-use transfer operation. Pending callbacks, failed/cancelled turns,
 abandonment, changed registration, late invalidation and lost originals cannot
 be replaced by saved receipt JSON or caller assertions.
+The adapter serializes issuance with retention changes and rechecks the same
+uniquely owned collector before and after issuance. Expired or ambiguous ownership
+cannot be replaced by an in-flight reference to the former collector.
 
 The owner runs `live_delivery.LiveDeliveryAttempt` as a separate process on the
 producer's Linux host, using the same private key file and an explicitly configured

@@ -61,7 +61,7 @@ class ReceiptRuntime:
             channel_key = self._ensure_channel(directory)
             if channel_key is False:
                 return None
-            self._expire()
+            _retired = self._expire()
             item = self.turns.get(key)
             if item is None:
                 if len(self.turns) >= _MAX_TURNS:
@@ -89,7 +89,7 @@ class ReceiptRuntime:
         if directory is None:
             return {"status": "unverified"}
         with self.lock:
-            self._expire()
+            _retired = self._expire()
             matches = [c for (d, _), (_, c) in self.turns.items()
                        if d == directory and c.turn_id == turn_id
                        and c.profile == self.context._manager.scope_key]
@@ -98,10 +98,13 @@ class ReceiptRuntime:
         return matches[0].collect(deadline_seconds=deadline_seconds)
 
     def _expire(self):
+        """Caller holds lock; keep removals alive until that caller releases it."""
         now = self.clock()
+        retired = []
         for key, (opened, _) in list(self.turns.items()):
             if now - opened >= _RETENTION_SECONDS:
-                del self.turns[key]
+                retired.append(self.turns.pop(key))
+        return retired
 
     def _proof_config(self, directory):
         settings = self.context.get_config("receipts", {})
@@ -148,17 +151,16 @@ class ReceiptRuntime:
     def _proof_handler(self, operation, binding):
         if not self._channel_enabled() or not self.lock.acquire(timeout=0.1):
             return None
+        _retired = []
         try:
-            self._expire()
-            matches = [c for (d, _), (_, c) in self.turns.items()
-                       if d == self._channel_spec[0] and c.profile == binding["profile"]
-                       and c.producer == binding["producer"]
-                       and c.turn_sha256 == binding["turn_sha256"]]
+            _retired.extend(self._expire())
+            matches = self._proof_matches(binding)
         finally:
             self.lock.release()
         if len(matches) != 1:
             return None
-        collector = matches[0]
+        key, item = matches[0]
+        collector = item[1]
         trace = binding["trace_id"]
         report = collector.collect(deadline_seconds=0.2)
         if report.get(trace, {}).get("status") != "collected":
@@ -166,10 +168,31 @@ class ReceiptRuntime:
         expected = collector.expected_binding(trace)
         if any(expected.get(k) != v for k, v in binding.items()):
             return None
-        envelope = collector.issue_transfer(trace) if operation == "transfer" else None
-        if not self._channel_enabled():
+        if not self.lock.acquire(timeout=0.1):
             return None
-        return {"binding": expected, "envelope": envelope}
+        try:
+            _retired.extend(self._expire())
+            if not self._owns_proof_collector(key, item, binding) or not self._channel_enabled():
+                return None
+            # Expiry and adapter admission use this same lock. A physical local
+            # reference alone is not retained ownership or permission to sign.
+            envelope = collector.issue_transfer(trace) if operation == "transfer" else None
+            _retired.extend(self._expire())
+            if not self._owns_proof_collector(key, item, binding) or not self._channel_enabled():
+                return None
+            return {"binding": expected, "envelope": envelope}
+        finally:
+            self.lock.release()
+
+    def _proof_matches(self, binding):
+        # Caller holds the runtime lock and has expired its current ledger.
+        return [(key, item) for key, item in self.turns.items()
+                if key[0] == self._channel_spec[0] and item[1].profile == binding["profile"]
+                and item[1].producer == binding["producer"]
+                and item[1].turn_sha256 == binding["turn_sha256"]]
+
+    def _owns_proof_collector(self, key, item, binding):
+        return self.turns.get(key) is item and len(self._proof_matches(binding)) == 1
 
     def close(self):
         if os.getpid() != self.pid:
