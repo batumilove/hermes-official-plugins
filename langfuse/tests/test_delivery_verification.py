@@ -159,3 +159,35 @@ def test_signed_transfer_cannot_omit_profile_authority(transfer, profile):
     verifier, backend = setup([row()])
     assert verifier.verify(signed(payload), expected_binding=binding).verdict == "unverified"
     assert backend.calls == 0
+
+
+@pytest.mark.parametrize("field", ["profile", "producer", "receipt_sha256", "registration_sha256",
+                                   "turn_sha256", "trace_id"])
+def test_well_formed_mismatching_pins_reach_authentication_boundary(transfer, field):
+    payload, binding = transfer
+    wire = signed(payload)
+    if field == "producer":
+        binding[field] = dict(binding[field], pid=43)
+    elif field == "profile":
+        binding[field] = "other-synthetic-profile"
+    else:
+        binding[field] = "0" * (32 if field == "trace_id" else 64)
+    verifier, backend = setup([row()])
+    result = verifier.verify(wire, expected_binding=binding)
+    assert result.verdict == "unverified" and result.reason == "invalid_transfer"
+    assert backend.calls == 0
+
+
+def test_authenticated_receipt_window_failure_is_distinct_and_not_retried(transfer):
+    payload, binding = transfer
+    payload["snapshot"]["created_at"] = NOW - 86399
+    digest = hashlib.sha256(canonical(payload["snapshot"])).hexdigest()
+    payload["proof"]["receipt_sha256"] = payload["receipt_sha256"] = binding["receipt_sha256"] = digest
+    verifier, backend = setup([row()])
+    wire = signed(payload)
+    result = verifier.verify(wire, expected_binding=binding)
+    assert result.verdict == "unverified" and result.reason == "invalid_read_window"
+    assert backend.calls == 0
+    # Authentication consumed this nonce. A bounded-query failure grants no retry.
+    assert verifier.verify(wire, expected_binding=binding).reason == "invalid_transfer"
+    assert backend.calls == 0

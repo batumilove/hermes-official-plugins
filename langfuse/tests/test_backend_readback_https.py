@@ -32,10 +32,20 @@ def endpoint(tmp_path):
             self.send_response(state["status"])
             if state["status"] == 302:
                 self.send_header("Location", state["url"] + "/redirect-target")
-            self.send_header("Content-Length", str(state.get("declared_length", len(state["body"]))))
+            framing = state.get("framing", "length")
+            if framing == "length":
+                self.send_header("Content-Length", str(state.get("declared_length", len(state["body"]))))
+            elif framing == "chunked":
+                self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             try:
-                self.wfile.write(state["body"])
+                if framing == "chunked":
+                    for offset in range(0, len(state["body"]), 65536):
+                        chunk = state["body"][offset:offset + 65536]
+                        self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                    self.wfile.write(b"0\r\n\r\n")
+                else:
+                    self.wfile.write(state["body"])
             except (BrokenPipeError, ConnectionResetError):
                 pass  # oversized-body refusal intentionally closes the consumer first
 
@@ -117,3 +127,12 @@ def test_actual_http_failure_or_oversize_is_content_free(endpoint, monkeypatch, 
     with pytest.raises(module.ReadbackError) as caught:
         reader.read("a" * 32, start_time=1000, end_time=1010)
     assert str(caught.value) == reason
+
+
+@pytest.mark.parametrize("framing", ["eof", "chunked"])
+def test_actual_streaming_response_without_content_length_is_bounded(endpoint, monkeypatch, framing):
+    state, _ = endpoint
+    state.update(framing=framing, body=b"x" * 1048577)
+    reader = trusted_reader(endpoint, monkeypatch)
+    with pytest.raises(module.ReadbackError, match="response_too_large"):
+        reader.read("a" * 32, start_time=1000, end_time=1010)

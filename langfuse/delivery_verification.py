@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 
 from . import delivery_receipts as receipts
-from .backend_readback import ObservationReader, ReadbackError, _invalid_constant, _unique_object
+from .backend_readback import ObservationReader, ReadbackError, ReadWindowError, _invalid_constant, _unique_object
 
 _WIRE_BYTES = 128 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -113,6 +113,8 @@ class DeliveryVerifier:
                                  else "inventory_not_delivered", pages=readback.pages,
                                  expected_count=len(snapshot["observations"]),
                                  observed_count=len(backend["observations"]))
+        except ReadWindowError:
+            return DeliveryCheck("unverified", "invalid_read_window")
         except ReadbackError as error:
             return DeliveryCheck("unverified", str(error))
         except (KeyError, TypeError, ValueError, AttributeError, RecursionError, OverflowError):

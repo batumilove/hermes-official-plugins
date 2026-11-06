@@ -26,6 +26,10 @@ class ReadbackError(RuntimeError):
     """Fixed diagnostic code only: never include URLs, response bodies or keys."""
 
 
+class ReadWindowError(ValueError):
+    """The requested query identity/window cannot be covered by this reader."""
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         fp.close()
@@ -88,12 +92,12 @@ def _stamp(value):
 
 def _window(trace_id, start_time, end_time):
     if not isinstance(trace_id, str) or not _TRACE.fullmatch(trace_id):
-        raise ValueError("invalid trace identity")
+        raise ReadWindowError("invalid trace identity")
     if any(type(t) not in (int, float) or not math.isfinite(t)
            for t in (start_time, end_time)):
-        raise ValueError("invalid time window")
+        raise ReadWindowError("invalid time window")
     if not 0 <= start_time < end_time or end_time - start_time > 86400:
-        raise ValueError("time window must be positive and at most 24 hours")
+        raise ReadWindowError("time window must be positive and at most 24 hours")
 
 
 def _response_length(response):

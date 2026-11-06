@@ -184,3 +184,31 @@ def test_ambiguous_http_framing_is_refused(headers):
     r._opener = SimpleNamespace(open=lambda *args, **kwargs: response)
     with pytest.raises(ReadbackError, match="invalid_http_framing"):
         r.read(TRACE, start_time=START, end_time=START + 10)
+
+
+@pytest.mark.parametrize("transfer_encoding", [None, "chunked"], ids=["eof", "decoded-chunks"])
+def test_streaming_size_cap_without_content_length(transfer_encoding):
+    from types import SimpleNamespace
+
+    class CountedResponse(io.BytesIO):
+        def __init__(self):
+            super().__init__(b"x" * (1048576 + 100))
+            self.headers = Message()
+            self.status = 200
+            self.sizes, self.total = [], 0
+            if transfer_encoding:
+                self.headers["Transfer-Encoding"] = transfer_encoding
+
+        def read1(self, size):
+            self.sizes.append(size)
+            data = super().read1(size)
+            self.total += len(data)
+            return data
+
+    response = CountedResponse()
+    r, _ = reader()
+    r._opener = SimpleNamespace(open=lambda *args, **kwargs: response)
+    with pytest.raises(ReadbackError, match="response_too_large"):
+        r.read(TRACE, start_time=START, end_time=START + 10)
+    assert response.total == 1048576 + 1
+    assert all(0 < size <= 65536 for size in response.sizes)

@@ -64,6 +64,9 @@ alone does not establish authenticated compatibility.
 `DeliveryVerifier` first validates HMAC, freshness, exact identity pins, original
 snapshot digest and normal terminal proof. A bad proof never queries the backend.
 Each accepted nonce is consumed before the query, including a failed query.
+An authenticated receipt whose query window exceeds the reader's bounds returns
+`unverified` with reason `invalid_read_window`, distinct from a bad transfer.
+Its nonce remains consumed; this diagnostic does not grant a retry.
 The same consumer instance must own the entire bounded attempt. Nonces are held
 in memory only: restarting the consumer is not persistent replay protection or
 permission to reuse a proof. A live workflow still needs authenticated transport
