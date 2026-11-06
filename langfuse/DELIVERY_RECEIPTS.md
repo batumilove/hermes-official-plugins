@@ -67,11 +67,12 @@ exit alone is not a terminal validity proof. Reader booleans, quiet logs and a s
 cannot reconstruct lost in-memory invalidations. Proof provenance must be authenticated by the
 owning collector; the pure offline function cannot authenticate arbitrary caller-created JSON.
 
-The local runtime now implements collector ownership and bounded object retention,
-with the original reader retained through host-turn quiescence. Authenticated remote
-terminal-proof transport, transfer-key provisioning, backend acceptance and storage
-retention ownership remain unfinished. Automatic live acceptance and activation remain
-BLOCKED pending those integrations and their review.
+The local runtime implements collector ownership and bounded object retention,
+with the original reader retained through host-turn quiescence. The explicit
+[backend reader](BACKEND_ACCEPTANCE.md) authenticates an existing signed transfer
+and independently queries Langfuse v2. Remote terminal-proof transport, transfer-key
+provisioning and storage retention ownership remain unfinished. Automatic live
+acceptance and activation remain BLOCKED pending those integrations and their review.
 
 The caller must build a private backend envelope from the installed API's actual readback:
 
@@ -93,7 +94,9 @@ all pages for this exact trace were retrieved without truncation under a declare
 period and cap. Normalize `ended` only from validated backend terminal timestamps/status, never
 from HTTP success or observation existence. `producer_terminal_verified` requires a separately
 validated owning lifecycle/turn completion record. `local_receipt_current` requires the fresh
-private reader after that boundary, together with the separate producer validity proof. No API adapter or automated live acceptance is supplied.
+private reader after that boundary, together with the separate producer validity proof.
+The explicit v2 API adapter derives its query result from actual readback;
+it supplies no automatic live acceptance workflow.
 
 Every expected ID must appear exactly once, with the same trace, parent and terminal state;
 missing, extra, duplicate, wrong-parent and wrong-trace rows prevent a success verdict. Open
