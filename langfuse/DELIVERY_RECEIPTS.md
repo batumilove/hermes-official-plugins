@@ -70,9 +70,11 @@ owning collector; the pure offline function cannot authenticate arbitrary caller
 The local runtime implements collector ownership and bounded object retention,
 with the original reader retained through host-turn quiescence. The explicit
 [backend reader](BACKEND_ACCEPTANCE.md) authenticates an existing signed transfer
-and independently queries Langfuse v2. Remote terminal-proof transport, transfer-key
-provisioning and storage retention ownership remain unfinished. Automatic live
-acceptance and activation remain BLOCKED pending those integrations and their review.
+and independently queries Langfuse v2. The optional [local proof channel](PROOF_CHANNEL.md)
+connects that retained collector to a separate same-host verifier process using
+request-bound authentication. Owner-controlled key provisioning, storage retention,
+exact loaded versions and live backend compatibility still require an activation
+plan and bounded acceptance evidence. Automatic activation remains disabled.
 
 The caller must build a private backend envelope from the installed API's actual readback:
 
@@ -132,8 +134,8 @@ The local operator/controller can call `runtime.collect(turn_id)` after host exi
 open turns or outstanding callbacks cannot produce a collected proof. Reused
 turn text matching multiple boundaries is rejected. There is no background poller.
 
-This stage provides local wiring only. It configures no signing key, transport,
-TLS endpoint, backend readback, delivery acknowledgement, or retention ownership.
-A collected proof is local evidence, not a delivery verdict. Detached SDK work
-remains outside the reviewed callback boundary. Runtime activation, publication
-and remote/backend acceptance require subsequent integration review.
+With no `proof_channel` opt-in this remains local wiring only. The optional channel
+requires an existing private key, socket directory and active host unload cleanup;
+the plugin provisions none of them. A collected proof is local evidence, not a
+delivery verdict. Detached SDK work remains outside the reviewed callback boundary.
+Runtime activation and actual backend acceptance require a separate bounded plan.

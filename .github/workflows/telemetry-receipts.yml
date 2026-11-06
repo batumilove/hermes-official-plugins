@@ -93,3 +93,47 @@ jobs:
             tests/agent/test_plugin_stream_evidence.py \
             tests/agent/test_turn_evidence_boundary.py \
             --file-timeout 120
+      - name: Produce verified core build identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$HERMES_PYTHON" - <<'PYCODE'
+          import dataclasses, hashlib, json, os, subprocess, sys
+          from pathlib import Path
+          from hermes_cli.version_info import get_version_info
+          from hermes_cli.version_provenance import IMPORTED_RELEASE
+          from scripts.write_install_stamp import build_stamp
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+          info = get_version_info()
+          assert info.commit == os.environ["CORE_SHA"] == git("rev-parse", "HEAD")
+          assert info.base_version == IMPORTED_RELEASE[0] and not info.dirty
+          assert not git("status", "--porcelain", "--untracked-files=no")
+          assert git("-C", "paired-plugin", "rev-parse", "HEAD") == os.environ["PLUGIN_SHA"]
+          output = Path(os.environ["RUNNER_TEMP"]) / "telemetry-core-identity"
+          output.mkdir(mode=0o700)
+          stamp = build_stamp(update_mechanism="external", commit=info.commit,
+              branch=info.branch or "", dirty=False, base_version=info.base_version,
+              display_version=info.derived_version, distance=info.distance,
+              commit_date=info.commit_date, source="ci")
+          encoded = (json.dumps(stamp, sort_keys=True, indent=2) + "\n").encode()
+          (output / "install-stamp.json").write_bytes(encoded)
+          identity = {"schema": 1, "core_commit": info.commit,
+              "core_tree": git("rev-parse", "HEAD^{tree}"),
+              "plugin_commit": os.environ["PLUGIN_SHA"],
+              "plugin_tree": git("-C", "paired-plugin", "rev-parse", "HEAD^{tree}"),
+              "python": sys.version, "version_info": dataclasses.asdict(info),
+              "stamp_sha256": hashlib.sha256(encoded).hexdigest(),
+              "core_inputs": {name: hashlib.sha256(Path(name).read_bytes()).hexdigest()
+                              for name in ("pyproject.toml", "uv.lock")},
+              "test_gate": "prior exact-core canonical test step succeeded",
+              "scope": "build identity only; no runtime or delivery acceptance"}
+          (output / "identity.json").write_text(json.dumps(identity, indent=2) + "\n")
+          PYCODE
+      - name: Publish verified core build identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: telemetry-core-identity-${{ env.CORE_SHA }}-${{ env.PLUGIN_SHA }}
+          path: ${{ runner.temp }}/telemetry-core-identity/
+          if-no-files-found: error
+          retention-days: 1

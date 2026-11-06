@@ -42,6 +42,7 @@ class _Observation:
     trace_id: str
     parent_id: str | None
     ended: bool
+    is_root: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,8 @@ class Readback:
     def observations(self):
         # Returned envelopes must not mutate the retained normalized readback.
         return tuple({"id": row.id, "trace_id": row.trace_id,
-                      "parent_id": row.parent_id, "ended": row.ended}
+                      "parent_id": row.parent_id, "ended": row.ended,
+                      **({"is_root": row.is_root} if row.is_root is not None else {})}
                      for row in self._observations)
 
 
@@ -209,14 +211,17 @@ class ObservationReader:
             ended = row["endTime"]
             if ended is not None and not started <= _epoch(ended) <= end_time:
                 raise ValueError
-            return _Observation(oid, trace_id, parent, ended is not None)
+            if "isRootObservation" in row and type(row["isRootObservation"]) is not bool:
+                raise ValueError
+            return _Observation(oid, trace_id, parent, ended is not None,
+                                row.get("isRootObservation"))
         except (KeyError, TypeError, ValueError, OverflowError):
             raise ReadbackError("invalid_observation") from None
 
     def read(self, trace_id: str, *, start_time: float, end_time: float) -> Readback:
         _window(trace_id, start_time, end_time)
         deadline = self._clock() + self._timeout
-        query = {"fields": "core", "traceId": trace_id, "limit": 100,
+        query = {"fields": "core,basic", "traceId": trace_id, "limit": 100,
                  "fromStartTime": _stamp(start_time), "toStartTime": _stamp(end_time)}
         observations, seen, cursors = [], set(), set()
         for page_number in range(1, self._max_pages + 1):

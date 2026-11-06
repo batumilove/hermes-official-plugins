@@ -107,7 +107,23 @@ class DeliveryVerifier:
             readback = self._reader.read(payload["trace_id"],
                                          start_time=snapshot["created_at"] - 5,
                                          end_time=snapshot["sealed_at"] + 5)
-            backend = dict(local, observations=list(readback.observations), complete=readback.complete)
+            observations = list(readback.observations)
+            root = snapshot["root_id"]
+            for row in observations:
+                if row["id"] == root:
+                    if row.get("is_root") is False:
+                        return DeliveryCheck("unverified", "invalid_root_lineage")
+                    if row["parent_id"] is not None:
+                        # Langfuse marks SDK application roots independently of
+                        # their synthetic, unexported physical parent. Only the
+                        # signed root may cross that external boundary.
+                        if (row.get("is_root") is not True
+                                or row["parent_id"] in snapshot["observations"]):
+                            return DeliveryCheck("unverified", "invalid_root_lineage")
+                        row["parent_id"] = None
+                elif row.get("is_root") is True:
+                    return DeliveryCheck("unverified", "invalid_root_lineage")
+            backend = dict(local, observations=observations, complete=readback.complete)
             verdict = receipts.reconcile(snapshot, backend, terminal_proof=payload["proof"], now=self._clock())
             return DeliveryCheck(verdict, "inventory_match" if verdict == "captured_inventory_delivered"
                                  else "inventory_not_delivered", pages=readback.pages,

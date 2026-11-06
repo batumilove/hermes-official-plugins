@@ -65,7 +65,7 @@ def test_cursor_exhaustion_including_empty_page_is_required():
         {"id": CHILD, "trace_id": TRACE, "parent_id": ROOT, "ended": True})
     for index, (request, timeout) in enumerate(transport.requests):
         query = parse_qs(urlsplit(request.full_url).query)
-        assert query["traceId"] == [TRACE] and query["fields"] == ["core"]
+        assert query["traceId"] == [TRACE] and query["fields"] == ["core,basic"]
         assert query["fromStartTime"] == [stamp(START)]
         assert query["toStartTime"] == [stamp(START + 10)]
         assert query.get("cursor") == (["next"] if index == 1 else ["last"] if index == 2 else None)
@@ -212,3 +212,18 @@ def test_streaming_size_cap_without_content_length(transfer_encoding):
         r.read(TRACE, start_time=START, end_time=START + 10)
     assert response.total == 1048576 + 1
     assert all(0 < size <= 65536 for size in response.sizes)
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_reader_preserves_physical_parent_and_validated_logical_root(flag):
+    r, _ = reader({"data": [observation(parent="d" * 16, isRootObservation=flag)], "meta": {}})
+    result = r.read(TRACE, start_time=START, end_time=START + 10)
+    assert result.observations[0]["parent_id"] == "d" * 16
+    assert result.observations[0]["is_root"] is flag
+
+
+@pytest.mark.parametrize("flag", [None, 1, "true", [], {}])
+def test_non_boolean_logical_root_is_not_evidence(flag):
+    r, _ = reader({"data": [observation(isRootObservation=flag)], "meta": {}})
+    with pytest.raises(ReadbackError, match="invalid_observation"):
+        r.read(TRACE, start_time=START, end_time=START + 10)

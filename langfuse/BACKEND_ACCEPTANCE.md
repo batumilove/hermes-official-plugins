@@ -36,10 +36,16 @@ The module name above is the test alias. A real directory plugin is imported by
 Hermes under its loader-assigned package; use that package's sibling modules.
 
 The [Langfuse v2 API](https://langfuse.com/docs/api-and-data-platform/features/observations-api)
-supports selecting only the `core` fields and cursor pagination. Every query is
+supports selecting `core,basic` fields and cursor pagination. The `basic` group
+provides the validated `isRootObservation` boolean; other basic fields are discarded. Every query is
 restricted to the selected trace and the signed receipt's creation/seal window,
 with a fixed five-second margin. Returned start and end timestamps must fit that
-window. Parentage uses `parentObservationId`, not the logical root flag.
+window. Physical parentage remains available as `parentObservationId`. For the exact
+signed Receipt root only, an explicit `isRootObservation: true` permits a physical
+parent outside the captured inventory to represent the SDK's application-root
+boundary. Its logical Receipt parent is null. A self/internal parent, a second
+application root, an explicit false root flag, or wrong child parent cannot pass.
+An external root parent without that explicit boolean remains unverified.
 An exhausted cursor establishes completeness of that bounded query only.
 It cannot establish completeness of uninstrumented work or observations outside
 the selected time window.
@@ -69,10 +75,13 @@ An authenticated receipt whose query window exceeds the reader's bounds returns
 Its nonce remains consumed; this diagnostic does not grant a retry.
 The same consumer instance must own the entire bounded attempt. Nonces are held
 in memory only: restarting the consumer is not persistent replay protection or
-permission to reuse a proof. A live workflow still needs authenticated transport
-and request-bound provenance, key provisioning/rotation, private evidence custody
-and an owner-approved expiry policy. Caller booleans and saved receipts alone
-cannot supply those requirements.
+permission to reuse a proof. The optional [local proof channel](PROOF_CHANNEL.md)
+supplies request-bound provenance from a live retained collector. Its
+`LiveDeliveryAttempt` API accepts one independently pinned Receipt, requests a fresh
+transfer and runs this reader; it accepts no saved transfer input. Key
+provisioning/rotation, private evidence custody and owner-approved expiry remain
+deployment prerequisites. Caller booleans and saved receipts alone cannot supply
+those requirements.
 
 Offline tests exercise synthetic signed proofs, parser and pagination failures,
 and actual loopback TLS/authentication, redirect refusal and response bounds.
