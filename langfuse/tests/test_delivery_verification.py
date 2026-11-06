@@ -113,7 +113,7 @@ def test_bad_proof_never_queries_backend(transfer, case):
 
 @pytest.mark.parametrize("rows, verdict", [([], "mismatch"), ([row(endTime=None)], "unverified"),
                                           ([row(), row(id="d" * 16)], "mismatch"),
-                                          ([row(parentObservationId="d" * 16)], "mismatch")])
+                                          ([row(parentObservationId="d" * 16)], "unverified")])
 def test_backend_http_success_is_not_delivery(transfer, rows, verdict):
     payload, binding = transfer
     verifier, _ = setup(rows)
@@ -191,3 +191,43 @@ def test_authenticated_receipt_window_failure_is_distinct_and_not_retried(transf
     # Authentication consumed this nonce. A bounded-query failure grants no retry.
     assert verifier.verify(wire, expected_binding=binding).reason == "invalid_transfer"
     assert backend.calls == 0
+
+
+def test_explicit_application_root_allows_only_an_external_physical_parent(transfer):
+    payload, binding = transfer
+    verifier, backend = setup([row(parentObservationId="d" * 16, isRootObservation=True)])
+    result = verifier.verify(signed(payload), expected_binding=binding)
+    assert result.verdict == "captured_inventory_delivered"
+    assert result.expected_count == result.observed_count == 1 and backend.calls == 1
+
+
+@pytest.mark.parametrize("changes", [
+    {"parentObservationId": "d" * 16},
+    {"parentObservationId": "d" * 16, "isRootObservation": False},
+    {"parentObservationId": ROOT, "isRootObservation": True},
+    {"isRootObservation": False},
+])
+def test_missing_or_contradictory_root_lineage_never_passes(transfer, changes):
+    payload, binding = transfer
+    verifier, _ = setup([row(**changes)])
+    assert verifier.verify(signed(payload), expected_binding=binding).verdict != "captured_inventory_delivered"
+
+
+@pytest.mark.parametrize("case", ["multiple_roots", "internal_root_parent", "wrong_child_parent"])
+def test_application_root_marker_cannot_hide_captured_lineage_errors(transfer, case):
+    payload, binding = transfer
+    child = "c" * 16
+    payload["snapshot"]["observations"][child] = {"parent_id": ROOT, "ended": True}
+    digest = hashlib.sha256(canonical(payload["snapshot"])).hexdigest()
+    payload["receipt_sha256"] = binding["receipt_sha256"] = digest
+    payload["proof"]["receipt_sha256"] = digest
+    rows = [row(parentObservationId="d" * 16, isRootObservation=True),
+            row(id=child, parentObservationId=ROOT, isRootObservation=False)]
+    if case == "multiple_roots":
+        rows[1]["isRootObservation"] = True
+    elif case == "internal_root_parent":
+        rows[0]["parentObservationId"] = child
+    else:
+        rows[1]["parentObservationId"] = "e" * 16
+    verifier, _ = setup(rows)
+    assert verifier.verify(signed(payload), expected_binding=binding).verdict != "captured_inventory_delivered"
