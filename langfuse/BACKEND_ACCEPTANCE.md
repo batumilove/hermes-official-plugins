@@ -77,6 +77,11 @@ stable, each page must have its full expected length, and the final inventory mu
 equal the declared total. Missing/changed totals, duplicate IDs and page-limit
 exhaustion remain unverified. No positive prefix can be accepted as complete.
 
+V1 returns full observation payloads. Content-heavy traces can exceed the
+one-MiB response cap and remain unverified with `response_too_large`.
+Metadata capture or smaller traces reduce this risk but do not guarantee
+that a response fits.
+
 The v1 schema lacks v2's logical-root boolean. New plugin roots therefore carry
 the fixed boolean `metadata.hermes_receipt_root=true` through the normal SDK.
 The marker is not propagated to children. The v1 reader validates that marker's
