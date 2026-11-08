@@ -30,6 +30,7 @@ class CleanupRefused(RuntimeError):
 
 
 def _require_producer_gone(pid):
+    """Require Linux process authority and PID absence; refuse numeric PID reuse."""
     # Refuse PID reuse as well: it is safer to require recovery than to infer
     # termination from a new process with the old numeric identity.
     if not Path('/proc/self/stat').is_file() or Path('/proc', str(pid)).exists():
@@ -44,6 +45,7 @@ class _CleanupBudget:
     Reusing that reader cannot renew the expiry or replenish requests.
     """
     def __init__(self, reader, binding):
+        """Bind a fresh 60-second, ten-request allowance to this process and scope."""
         self.binding = binding
         self.creator = os.getpid()
         self.expires = reader._clock() + 60
@@ -51,6 +53,11 @@ class _CleanupBudget:
         self.lock = threading.Lock()
 
     def reserve(self, reader, method):
+        """Reserve one request atomically, allowing at most one DELETE attempt.
+
+        Refuse another process before acquiring a possibly inherited lock.
+        Deadline and count failures consume no additional request allowance.
+        """
         # Check process identity before touching a potentially inherited lock.
         if os.getpid() != self.creator:
             raise CleanupRefused('cleanup_owner_or_deadline_changed')
@@ -68,6 +75,7 @@ class _CleanupBudget:
 class _CanaryRequests:
     def __init__(self, reader: ObservationReader, *, task_id: str,
                  producer_pid: int, start_time: float, end_time: float):
+        """Validate the v1 canary scope and reuse its reader-bound budget without I/O."""
         if (type(reader) is not ObservationReader or reader._api_version != 'v1'
                 or not isinstance(task_id, str)
                 or re.fullmatch(r'telemetry-canary-[0-9a-f]{32}', task_id) is None
@@ -89,20 +97,33 @@ class _CanaryRequests:
         self._budget = budget
 
     @property
-    def _expires(self):return self._budget.expires
+    def _expires(self):
+        """Return the original shared expiry; reconstruction cannot renew it."""
+        return self._budget.expires
 
     @property
-    def _requests(self):return self._budget.requests
+    def _requests(self):
+        """Return the request reservations shared by scopes using this reader."""
+        return self._budget.requests
 
     @property
-    def _delete_attempts(self):return self._budget.delete_attempts
+    def _delete_attempts(self):
+        """Return DELETE reservations, including ambiguous transport attempts."""
+        return self._budget.delete_attempts
 
     def _guard(self):
+        """Refuse changed process ownership, expiry or an extant producer PID."""
         if os.getpid() != self._budget.creator or self._reader._clock() >= self._expires:
             raise CleanupRefused('cleanup_owner_or_deadline_changed')
         _require_producer_gone(self._producer)
 
     def _request(self, method, url, *, allow_missing=False):
+        """Use the shared budget and bounded authenticated transport for one request.
+
+        Accept only JSON objects within 256 KiB and the remaining deadline.
+        An explicitly allowed GET 404 yields None; other failures expose fixed
+        refusal categories rather than private response bodies or credentials.
+        """
         self._guard()
         self._budget.reserve(self._reader, method)
         request = Request(url, headers={'Authorization': self._reader._authorization,
@@ -174,6 +195,7 @@ class CanaryTraceRetirement(_CanaryRequests):
 
     def __init__(self, reader, *, task_id, trace_id, root_id, producer_pid,
                  start_time, end_time, delete_journal):
+        """Bind validated trace/root identities and a journal path without deleting."""
         super().__init__(reader, task_id=task_id, producer_pid=producer_pid,
                          start_time=start_time, end_time=end_time)
         try:
@@ -187,6 +209,7 @@ class CanaryTraceRetirement(_CanaryRequests):
         self._used = False
 
     def _journal_bytes(self):
+        """Encode the canonical claim binding for exact cross-process comparison."""
         return json.dumps({'schema': 1, 'task_id': self._task, 'trace_id': self._trace,
             'root_id': self._root, 'project_sha256': hashlib.sha256(self._reader._project.encode()).hexdigest(),
             'endpoint_sha256': hashlib.sha256(self._reader._url.encode()).hexdigest(),
@@ -194,6 +217,10 @@ class CanaryTraceRetirement(_CanaryRequests):
             sort_keys=True, separators=(',', ':')).encode()
 
     def _claim_delete(self):
+        """Exclusively persist and fsync the DELETE fence before any write request.
+
+        Existing or partially written claims remain fences, never retry authority.
+        """
         self._guard()
         with _journal_folder(self._journal) as (folder, name):
             try:
@@ -210,6 +237,7 @@ class CanaryTraceRetirement(_CanaryRequests):
         self._guard()
 
     def _require_delete_claim(self):
+        """Require an owned, bounded regular claim matching the exact canonical bytes."""
         with _journal_folder(self._journal) as (folder, name):
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
             with os.fdopen(fd, 'rb') as stream:
@@ -287,6 +315,10 @@ class CanaryTraceRetirement(_CanaryRequests):
         return scope
 
     def _validate_root(self, raw):
+        """Validate authenticated root identity and exact synthetic-canary metadata.
+
+        An owned open root may qualify for cleanup, not successful delivery.
+        """
         try:
             row = self._reader._observation(raw, self._trace, self._start, self._end)
         except ReadbackError:

@@ -134,6 +134,7 @@ class ObservationReader:
     def __init__(self, base_url: str, public_key: str, secret_key: str, *,
                  project_id: str, timeout_seconds: float = 5.0, max_pages: int = 8,
                  api_version: str = "v2"):
+        """Validate endpoint, credentials and limits for an explicit API without I/O."""
         parsed = urlsplit(base_url)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
                 or parsed.password is not None or parsed.query or parsed.fragment
@@ -202,6 +203,7 @@ class ObservationReader:
             raise ReadbackError("invalid_response") from None
 
     def _observation(self, row, trace_id, start_time, end_time):
+        """Validate one row's identity, timestamps and typed API-specific root evidence."""
         try:
             if not isinstance(row, dict):
                 raise ValueError
@@ -236,6 +238,11 @@ class ObservationReader:
             raise ReadbackError("invalid_observation") from None
 
     def read(self, trace_id: str, *, start_time: float, end_time: float) -> Readback:
+        """Read the complete bounded trace window using the explicitly selected API.
+
+        Refuse malformed, oversized, duplicate or unfinished page sequences;
+        never downgrade APIs or accept a positive prefix as a complete inventory.
+        """
         _window(trace_id, start_time, end_time)
         if self._api_version == "v1":
             return self._read_v1(trace_id, start_time, end_time)
