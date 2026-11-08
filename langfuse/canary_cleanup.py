@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import time
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.error import HTTPError
@@ -35,6 +36,35 @@ def _require_producer_gone(pid):
         raise CleanupRefused('producer_not_proven_gone')
 
 
+class _CleanupBudget:
+    """One reader-bound pass, retained across discovery and reconstruction.
+
+    Each authorized cleanup worker creates exactly one reader. A new worker
+    may obtain a fresh read budget; the durable DELETE fence still survives it.
+    Reusing that reader cannot renew the expiry or replenish requests.
+    """
+    def __init__(self, reader, binding):
+        self.binding = binding
+        self.creator = os.getpid()
+        self.expires = reader._clock() + 60
+        self.requests = self.delete_attempts = 0
+        self.lock = threading.Lock()
+
+    def reserve(self, reader, method):
+        # Check process identity before touching a potentially inherited lock.
+        if os.getpid() != self.creator:
+            raise CleanupRefused('cleanup_owner_or_deadline_changed')
+        with self.lock:
+            if reader._clock() >= self.expires:
+                raise CleanupRefused('cleanup_owner_or_deadline_changed')
+            if self.requests >= 10:
+                raise CleanupRefused('cleanup_request_limit')
+            if method == 'DELETE' and self.delete_attempts:
+                raise CleanupRefused('delete_already_attempted')
+            self.requests += 1
+            if method == 'DELETE':self.delete_attempts += 1
+
+
 class _CanaryRequests:
     def __init__(self, reader: ObservationReader, *, task_id: str,
                  producer_pid: int, start_time: float, end_time: float):
@@ -48,30 +78,41 @@ class _CanaryRequests:
             raise CleanupRefused('invalid_canary_window')
         self._reader = reader
         self._task = task_id
-        self._producer, self._creator = producer_pid, os.getpid()
+        self._producer = producer_pid
         self._start, self._end = start_time, end_time
-        self._expires = reader._clock() + 60
-        self._requests = 0
-        self._delete_attempts = 0
+        binding = (task_id, producer_pid, start_time, end_time)
+        # setdefault keeps one budget even for concurrent scope construction;
+        # creating a discarded inert candidate performs no I/O or requests.
+        budget = reader.__dict__.setdefault('_canary_cleanup_budget', _CleanupBudget(reader, binding))
+        if type(budget) is not _CleanupBudget or budget.binding != binding:
+            raise CleanupRefused('cleanup_budget_binding_changed')
+        self._budget = budget
+
+    @property
+    def _expires(self):return self._budget.expires
+
+    @property
+    def _requests(self):return self._budget.requests
+
+    @property
+    def _delete_attempts(self):return self._budget.delete_attempts
 
     def _guard(self):
-        if os.getpid() != self._creator or self._reader._clock() >= self._expires:
+        if os.getpid() != self._budget.creator or self._reader._clock() >= self._expires:
             raise CleanupRefused('cleanup_owner_or_deadline_changed')
         _require_producer_gone(self._producer)
 
     def _request(self, method, url, *, allow_missing=False):
         self._guard()
-        if self._requests >= 10:
-            raise CleanupRefused('cleanup_request_limit')
-        self._requests += 1
+        self._budget.reserve(self._reader, method)
         request = Request(url, headers={'Authorization': self._reader._authorization,
                                         'Accept': 'application/json'}, method=method)
-        deadline = min(self._expires, self._reader._clock() + self._reader._timeout)
+        deadline = min(self._expires, self._reader._clock() + min(5.0, self._reader._timeout))
         try:
-            if method == 'DELETE':
-                self._delete_attempts += 1
             with self._reader._opener.open(request, timeout=self._reader._remaining(deadline)) as response:
                 expected = _response_length(response)
+                if expected is not None and expected > 262144:
+                    raise CleanupRefused('cleanup_response_limit')
                 chunks, size = [], 0
                 while True:
                     self._reader._remaining(deadline)
@@ -310,9 +351,20 @@ class CanaryTraceRetirement(_CanaryRequests):
                 time.sleep(1)
             if self._request('GET', trace_url, allow_missing=True) is None:
                 self._guard()
-                remaining = reader.read(self._trace, start_time=self._start, end_time=self._end)
+                # Absence needs one exact empty numbered page, not a second
+                # transport path with a separate deadline, counter or byte cap.
+                from urllib.parse import urlencode
+                query = {'traceId': self._trace, 'page': 1, 'limit': 1,
+                         'fromStartTime': _stamp(self._start), 'toStartTime': _stamp(self._end)}
+                remaining = self._request('GET', reader._url + '?' + urlencode(query))
                 self._guard()
-                if remaining.complete and not remaining.observations:
+                meta, rows = remaining.get('meta'), remaining.get('data')
+                if (not isinstance(meta,dict) or not isinstance(rows,list)
+                        or any(type(meta.get(k)) is not int for k in ('page','limit','totalItems','totalPages'))
+                        or meta['page']!=1 or meta['limit']!=1 or meta.get('cursor') is not None
+                        or meta['totalItems']<0 or meta['totalPages']!=meta['totalItems']):
+                    raise CleanupRefused('cleanup_inventory_invalid')
+                if meta['totalItems']==0 and rows==[]:
                     return {'status': 'canary_api_retirement_verified', 'delete_claims': 1,
                             'delete_attempts_current_process': self._delete_attempts,
                             'trace_absent': True, 'observations_absent': True,

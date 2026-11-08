@@ -113,8 +113,18 @@ one owned trace (including at most two matching roots from the SDK root-open
 fallback). Wrong metadata, different traces, truncated pages or larger counts
 refuse cleanup. No matching row means unobserved/pending, not successful cleanup.
 
-The utility checks trace absence up to four times and independently checks that
-the bounded observation inventory is empty. A deletion acknowledgement alone is
+Discovery, project/trace reads, DELETE and the final observation check share one
+reader-bound budget: ten requests, a 60-second original expiry and a 256KiB cap
+on every response. Discovery and scope reconstruction with the same reader
+cannot renew this budget. A fresh authorized cleanup worker creates one fresh
+reader/read budget; the owner limits the complete attempt to three such workers,
+and the durable DELETE claim remains shared across them.
+
+The utility checks trace absence up to four times and independently requires an
+exact empty numbered observation page (`limit=1`, zero items and zero pages).
+Any nonempty or inconsistent inventory refuses retirement without fetching more
+pages. This empty-query check uses the same transport and budget as every other
+cleanup request. A deletion acknowledgement alone is
 `canary_deletion_pending`, never retirement. Deferred deletion requires an
 owner-bound read-only recovery record; it does not permit another export or an
 automatic repeated DELETE. `from_journal()` rechecks the full claim and preserves
