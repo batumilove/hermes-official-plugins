@@ -83,6 +83,9 @@ def test_default_profile_is_named(traced):
     mod, roots, propagated, _ = traced
     _open_turn(mod)
     assert roots[0]["metadata"]["profile"] == "default"
+    assert roots[0]["metadata"]["hermes_receipt_root"] is True
+    # The root marker is attached to that SDK observation, not propagated to children.
+    assert "hermes_receipt_root" not in propagated[0]["metadata"]
     assert propagated[0]["metadata"] == {"profile": "default"}
 
 

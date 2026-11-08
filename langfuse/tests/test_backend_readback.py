@@ -54,6 +54,85 @@ def reader(*pages, **kwargs):
     return result, transport
 
 
+def numbered_page(rows, *, page=1, total=None, **changes):
+    total = len(rows) if total is None else total
+    return {"data": rows, "meta": dict(page=page, limit=100, totalItems=total,
+                                       totalPages=(total + 99) // 100, **changes)}
+
+
+def test_v1_exhausts_numbered_pages_without_downgrading_or_losing_identity():
+    rows = [observation(f"{i + 1:016x}", metadata={"hermes_receipt_root": i == 0})
+            for i in range(201)]
+    r, transport = reader(numbered_page(rows[:100], total=201),
+                          numbered_page(rows[100:200], page=2, total=201),
+                          numbered_page(rows[200:], page=3, total=201), api_version="v1")
+    result = r.read(TRACE, start_time=START, end_time=START + 10)
+    assert result.complete and result.pages == 3 and len(result.observations) == 201
+    assert result.observations[0]["is_root"] is True
+    for number, (request, timeout) in enumerate(transport.requests, 1):
+        url = urlsplit(request.full_url)
+        query = parse_qs(url.query)
+        assert url.path == "/api/public/observations" and "fields" not in query
+        assert query["traceId"] == [TRACE] and query["page"] == [str(number)]
+        assert query["fromStartTime"] == [stamp(START)]
+        assert query["toStartTime"] == [stamp(START + 10)] and 0 < timeout <= 5
+
+
+def test_v1_zero_total_is_complete_only_with_empty_data():
+    r, transport = reader(numbered_page([]), api_version="v1")
+    assert r.read(TRACE, start_time=START, end_time=START + 10).observations == ()
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("page", True), ("page", 2), ("limit", 10), ("totalItems", -1),
+    ("totalItems", 257), ("totalPages", 0), ("totalPages", 1.0), ("cursor", "next")])
+def test_v1_invalid_pagination_never_returns_partial_evidence(field, value):
+    page = numbered_page([observation()])
+    page["meta"][field] = value
+    r, _ = reader(page, api_version="v1")
+    with pytest.raises(ReadbackError):
+        r.read(TRACE, start_time=START, end_time=START + 10)
+
+
+@pytest.mark.parametrize("case", ["short_page", "changed_count", "duplicate", "page_limit"])
+def test_v1_incomplete_or_changing_inventory_is_not_complete(case):
+    rows = [observation(f"{i + 1:016x}") for i in range(101)]
+    first = numbered_page(rows[:100], total=101)
+    last = numbered_page(rows[100:], page=2, total=101)
+    kwargs = {"api_version": "v1"}
+    if case == "short_page":
+        first["data"].pop()
+    elif case == "changed_count":
+        last["meta"]["totalItems"] = 102
+    elif case == "duplicate":
+        last["data"] = [rows[0]]
+    else:
+        kwargs["max_pages"] = 1
+    r, _ = reader(first, last, **kwargs)
+    with pytest.raises(ReadbackError):
+        r.read(TRACE, start_time=START, end_time=START + 10)
+
+
+@pytest.mark.parametrize("changes", [{"projectId": "other"}, {"traceId": "0" * 32},
+    {"metadata": {"hermes_receipt_root": "true"}}, {"metadata": []}])
+def test_v1_rejects_wrong_identity_and_malformed_root_marker(changes):
+    r, _ = reader(numbered_page([observation(**changes)]), api_version="v1")
+    with pytest.raises(ReadbackError, match="invalid_observation"):
+        r.read(TRACE, start_time=START, end_time=START + 10)
+
+
+def test_api_selection_is_explicit_and_v2_does_not_fall_back():
+    with pytest.raises(ValueError):
+        reader(api_version="auto")
+    from urllib.error import HTTPError
+    r, transport = reader(HTTPError("https://synthetic.invalid", 404, "", {}, None))
+    with pytest.raises(ReadbackError, match="transport_failed"):
+        r.read(TRACE, start_time=START, end_time=START + 10)
+    assert len(transport.requests) == 1
+    assert urlsplit(transport.requests[0][0].full_url).path == "/api/public/v2/observations"
+
+
 def test_cursor_exhaustion_including_empty_page_is_required():
     r, transport = reader({"data": [observation()], "meta": {"cursor": "next"}},
                           {"data": [], "meta": {"cursor": "last"}},

@@ -706,6 +706,7 @@ def _trace_tags(platform: str) -> list[str]:
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "", user_id: str = "") -> TraceState:
+    """Start a detached turn root with scoped identity, capture policy and root metadata."""
     # Session IDs deliberately group Langfuse traces, but cannot also identify
     # a trace: gateway and hosted-room turns retain one session across many
     # replies.  Prefer the unique turn ID (then request ID for hook callers
@@ -725,7 +726,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     metadata = {
         "source": "hermes", "task_id": task_id, "turn_id": turn_id, "api_request_id": api_request_id,
         "platform": platform, "provider": provider, "model": model, "api_mode": api_mode,
-        "capture_mode": _capture_mode(), "profile": profile, **kanban,
+        "capture_mode": _capture_mode(), "profile": profile, "hermes_receipt_root": True, **kanban,
     }
     # session_id must be in trace_context for Langfuse session grouping.
     trace_ctx: dict[str, Any] = {"trace_id": trace_id, **({"session_id": session_id} if session_id else {})}
