@@ -1,4 +1,4 @@
-"""Explicit, bounded Langfuse v2 readback; no exporter, polling job or raw output."""
+"""Explicit, bounded Langfuse readback; no exporter, polling job or raw output."""
 from __future__ import annotations
 
 import base64
@@ -125,14 +125,15 @@ def _response_length(response):
 class ObservationReader:
     """Read one explicit trace/project/window. Construction performs no requests.
 
-    Only the v2 API is supported; an unavailable API is unverified, never an
-    automatic downgrade. Keys remain in memory. No raw response is retained.
+    API selection is explicit; an unavailable API is never an automatic
+    downgrade. Keys remain in memory. No raw response is retained.
     Socket operations have a finite timeout; the query's elapsed deadline is
     checked between open/read/page operations (not a hard process watchdog).
     """
 
     def __init__(self, base_url: str, public_key: str, secret_key: str, *,
-                 project_id: str, timeout_seconds: float = 5.0, max_pages: int = 8):
+                 project_id: str, timeout_seconds: float = 5.0, max_pages: int = 8,
+                 api_version: str = "v2"):
         parsed = urlsplit(base_url)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
                 or parsed.password is not None or parsed.query or parsed.fragment
@@ -150,7 +151,11 @@ class ObservationReader:
                 or not 0 < timeout_seconds <= 10 or type(max_pages) is not int
                 or not 1 <= max_pages <= 16):
             raise ValueError("invalid read limits")
-        self._url = base_url.rstrip("/") + "/api/public/v2/observations"
+        if api_version not in ("v1", "v2"):
+            raise ValueError("explicit supported observation API required")
+        self._api_version = api_version
+        self._url = base_url.rstrip("/") + (
+            "/api/public/observations" if api_version == "v1" else "/api/public/v2/observations")
         self._authorization = "Basic " + base64.b64encode(
             f"{public_key}:{secret_key}".encode()).decode("ascii")
         self._project = project_id
@@ -213,13 +218,27 @@ class ObservationReader:
                 raise ValueError
             if "isRootObservation" in row and type(row["isRootObservation"]) is not bool:
                 raise ValueError
+            logical_root = row.get("isRootObservation")
+            if self._api_version == "v1":
+                # v3's v1 response has no logical-root field. The plugin emits
+                # this fixed marker on its root before SDK export. It is useful
+                # only alongside the authenticated exact root/trace/project pins;
+                # DeliveryVerifier still rejects marked children/internal parents.
+                metadata = row.get("metadata")
+                if metadata is not None and not isinstance(metadata, dict):
+                    raise ValueError
+                logical_root = (metadata or {}).get("hermes_receipt_root")
+                if logical_root is not None and type(logical_root) is not bool:
+                    raise ValueError
             return _Observation(oid, trace_id, parent, ended is not None,
-                                row.get("isRootObservation"))
+                                logical_root)
         except (KeyError, TypeError, ValueError, OverflowError):
             raise ReadbackError("invalid_observation") from None
 
     def read(self, trace_id: str, *, start_time: float, end_time: float) -> Readback:
         _window(trace_id, start_time, end_time)
+        if self._api_version == "v1":
+            return self._read_v1(trace_id, start_time, end_time)
         deadline = self._clock() + self._timeout
         query = {"fields": "core,basic", "traceId": trace_id, "limit": 100,
                  "fromStartTime": _stamp(start_time), "toStartTime": _stamp(end_time)}
@@ -245,4 +264,44 @@ class ObservationReader:
                 raise ReadbackError("invalid_cursor")
             cursors.add(cursor)
             query["cursor"] = cursor
+        raise ReadbackError("page_limit")
+
+    def _read_v1(self, trace_id, start_time, end_time):
+        """Exhaust numbered pages; never call a partial/inconsistent count complete."""
+        deadline = self._clock() + self._timeout
+        query = {"traceId": trace_id, "limit": 100,
+                 "fromStartTime": _stamp(start_time), "toStartTime": _stamp(end_time)}
+        observations, seen, totals = [], set(), None
+        for number in range(1, self._max_pages + 1):
+            page = self._page(dict(query, page=number), deadline)
+            if (not isinstance(page, dict) or not isinstance(page.get("data"), list)
+                    or not isinstance(page.get("meta"), dict)):
+                raise ReadbackError("invalid_response")
+            meta = page["meta"]
+            if (any(type(meta.get(k)) is not int for k in
+                    ("page", "limit", "totalItems", "totalPages"))
+                    or meta["page"] != number or meta["limit"] != 100
+                    or not 0 <= meta["totalItems"] <= MAX_OBSERVATIONS
+                    or meta["totalPages"] != (meta["totalItems"] + 99) // 100
+                    or meta.get("cursor") is not None):
+                raise ReadbackError("invalid_pagination")
+            current = (meta["totalItems"], meta["totalPages"])
+            if totals is not None and current != totals:
+                raise ReadbackError("unstable_pagination")
+            totals = current
+            if meta["totalPages"] > self._max_pages:
+                raise ReadbackError("page_limit")
+            expected = min(100, max(0, meta["totalItems"] - (number - 1) * 100))
+            if len(page["data"]) != expected:
+                raise ReadbackError("incomplete_response")
+            for row in page["data"]:
+                item = self._observation(row, trace_id, start_time, end_time)
+                if item.id in seen:
+                    raise ReadbackError("duplicate_observation")
+                seen.add(item.id)
+                observations.append(item)
+            if number >= meta["totalPages"]:
+                if len(observations) != meta["totalItems"]:
+                    raise ReadbackError("incomplete_response")
+                return Readback(trace_id, number, tuple(observations))
         raise ReadbackError("page_limit")

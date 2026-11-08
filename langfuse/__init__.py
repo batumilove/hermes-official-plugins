@@ -725,7 +725,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     metadata = {
         "source": "hermes", "task_id": task_id, "turn_id": turn_id, "api_request_id": api_request_id,
         "platform": platform, "provider": provider, "model": model, "api_mode": api_mode,
-        "capture_mode": _capture_mode(), "profile": profile, **kanban,
+        "capture_mode": _capture_mode(), "profile": profile, "hermes_receipt_root": True, **kanban,
     }
     # session_id must be in trace_context for Langfuse session grouping.
     trace_ctx: dict[str, Any] = {"trace_id": trace_id, **({"session_id": session_id} if session_id else {})}

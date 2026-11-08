@@ -46,13 +46,15 @@ def transfer():
 
 
 class Backend:
-    def __init__(self, rows):
-        self.rows, self.calls = rows, 0
+    def __init__(self, rows, api_version="v2"):
+        self.rows, self.calls, self.api_version = rows, 0, api_version
 
     def open(self, request, *, timeout):
         import io
         self.calls += 1
-        data = json.dumps({"data": self.rows, "meta": {}}).encode()
+        meta = (dict(page=1, limit=100, totalItems=len(self.rows),
+                     totalPages=1 if self.rows else 0) if self.api_version == "v1" else {})
+        data = json.dumps({"data": self.rows, "meta": meta}).encode()
         response = io.BytesIO(data)
         response.headers = Message()
         response.headers["Content-Length"] = str(len(data))
@@ -60,10 +62,10 @@ class Backend:
         return response
 
 
-def setup(rows):
+def setup(rows, *, api_version="v2"):
     reader = ObservationReader("https://synthetic.invalid", "pk-test", "sk-test",
-                               project_id="synthetic-project")
-    backend = Backend(rows)
+                               project_id="synthetic-project", api_version=api_version)
+    backend = Backend(rows, api_version)
     reader._opener = backend
     return DeliveryVerifier(KEY, reader, clock=lambda: NOW), backend
 
@@ -86,6 +88,23 @@ def test_exact_authenticated_snapshot_and_backend_match(transfer):
     # This verifier's receipt can be consumed only once, even on a later call.
     assert verifier.verify(signed(payload), expected_binding=binding).verdict == "unverified"
     assert backend.calls == 1
+
+
+@pytest.mark.parametrize("marker,expected", [
+    (True, "captured_inventory_delivered"), (False, "unverified"), (None, "unverified"),
+    ("true", "unverified")])
+def test_v1_external_root_requires_explicit_marker_and_authenticated_root(transfer, marker, expected):
+    payload, binding = transfer
+    verifier, backend = setup([row(parentObservationId="d" * 16,
+                                  metadata={"hermes_receipt_root": marker})], api_version="v1")
+    result = verifier.verify(signed(payload), expected_binding=binding)
+    assert result.verdict == expected and backend.calls == 1
+
+
+def test_v1_root_marker_cannot_turn_a_child_into_the_authenticated_root(transfer):
+    payload, binding = transfer
+    verifier, _ = setup([row(id="c" * 16, metadata={"hermes_receipt_root": True})], api_version="v1")
+    assert verifier.verify(signed(payload), expected_binding=binding).reason == "invalid_root_lineage"
 
 
 @pytest.mark.parametrize("case", ["signature", "stale", "profile", "producer", "digest",

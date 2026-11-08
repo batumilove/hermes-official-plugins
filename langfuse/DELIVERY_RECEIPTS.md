@@ -70,7 +70,7 @@ owning collector; the pure offline function cannot authenticate arbitrary caller
 The local runtime implements collector ownership and bounded object retention,
 with the original reader retained through host-turn quiescence. The explicit
 [backend reader](BACKEND_ACCEPTANCE.md) authenticates an existing signed transfer
-and independently queries Langfuse v2. The optional [local proof channel](PROOF_CHANNEL.md)
+and independently queries the selected supported Langfuse API. The optional [local proof channel](PROOF_CHANNEL.md)
 connects that retained collector to a separate same-host verifier process using
 request-bound authentication. Owner-controlled key provisioning, storage retention,
 exact loaded versions and live backend compatibility still require an activation
@@ -97,7 +97,7 @@ period and cap. Normalize `ended` only from validated backend terminal timestamp
 from HTTP success or observation existence. `producer_terminal_verified` requires a separately
 validated owning lifecycle/turn completion record. `local_receipt_current` requires the fresh
 private reader after that boundary, together with the separate producer validity proof.
-The explicit v2 API adapter derives its query result from actual readback;
+The explicit API adapter derives its query result from actual readback;
 it supplies no automatic live acceptance workflow.
 
 Every expected ID must appear exactly once, with the same trace, parent and terminal state;
